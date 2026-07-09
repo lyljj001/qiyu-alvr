@@ -1,0 +1,18 @@
+// Root project build file for the ALVR Qiyu Dream client.
+// The actual app lives in :app (see app/build.gradle).
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

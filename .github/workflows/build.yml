@@ -1,0 +1,73 @@
+name: Build ALVR Qiyu APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}      # allows manual "Run workflow" from the Actions tab
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ALVR_TAG: v20.14.1
+      NDK_VERSION: 25.1.8937393
+      GRADLE_VERSION: 7.6.1
+
+    steps:
+      - name: Checkout this client repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK + NDK + CMake
+        uses: android-actions/setup-android@v3
+      - name: Install Android packages
+        run: |
+          sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;${{ env.NDK_VERSION }}" "cmake;3.22.1"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Install cargo-ndk + cbindgen
+        run: |
+          cargo install cargo-ndk --version 2.16.0
+          cargo install cbindgen --version 0.26.0
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            /tmp/alvr/target
+          key: ${{ runner.os }}-cargo-${{ env.ALVR_TAG }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build alvr_client_core + generate header + stage artifacts
+        run: bash build.sh
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_NDK }}
+
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          wget -q "https://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-all.zip" -O /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${{ env.GRADLE_VERSION }}/bin" >> "$GITHUB_PATH"
+
+      - name: Build release APK
+        run: gradle assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: alvr-qiyu-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
