@@ -39,7 +39,9 @@ android {
     }
     sourceSets {
         main {
-            jniLibs.srcDirs = ["src/main/jniLibs", "../../build/alvr_client_core"]
+            // build.sh stages the .so at the REPO ROOT: <repo>/build/alvr_client_core/{arm64-v8a}
+            // This build.gradle is at <repo>/app/build.gradle, so the relative path is ../build/...
+            jniLibs.srcDirs = ["src/main/jniLibs", "../build/alvr_client_core"]
         }
     }
     compileOptions {
