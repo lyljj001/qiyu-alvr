@@ -109,8 +109,10 @@ public class VRActivity extends Activity {
         // 3) Pass the app's AssetManager to the Qiyu SDK. libqiyivrsdkcore.so's
         //    setNativeAssetManager native method uses AAssetManager_fromJava to
         //    load shaders/configs. Must be called before qiyu_Init.
+        //    Note: setNativeAssetManager is an INSTANCE method (confirmed by
+        //    compilation error), so we create an AndroidPlugin instance first.
         try {
-            com.qiyi.qiyivrsdkcore.AndroidPlugin.setNativeAssetManager(getAssets());
+            new com.qiyi.qiyivrsdkcore.AndroidPlugin().setNativeAssetManager(getAssets());
         } catch (Throwable t) {
             // Best-effort; if this fails, the SDK may still work without assets
             // or will report the issue later.
