@@ -388,9 +388,9 @@ void updateBinary(uint64_t path, bool value) {
 
     AlvrButtonValue b{};
     b.tag = ALVR_BUTTON_VALUE_BINARY;
-    b.BINARY._0 = value;
+    b.binary = value;
 
-    bool changed = (stateRef->tag != ALVR_BUTTON_VALUE_BINARY) || (stateRef->BINARY._0 != value);
+    bool changed = (stateRef->tag != ALVR_BUTTON_VALUE_BINARY) || (stateRef->binary != value);
     if (changed) {
         *stateRef = b;
         alvr_send_button(path, b);
@@ -402,10 +402,10 @@ void updateScalar(uint64_t path, float value) {
 
     AlvrButtonValue b{};
     b.tag = ALVR_BUTTON_VALUE_SCALAR;
-    b.SCALAR._0 = value;
+    b.scalar = value;
 
     bool changed = (stateRef->tag != ALVR_BUTTON_VALUE_SCALAR) ||
-                   (fabsf(stateRef->SCALAR._0 - value) > BUTTON_EPS);
+                   (fabsf(stateRef->scalar - value) > BUTTON_EPS);
     if (changed) {
         *stateRef = b;
         alvr_send_button(path, b);
