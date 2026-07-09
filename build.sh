@@ -83,6 +83,16 @@ trap cleanup EXIT
 echo "==> Cloning ALVR $ALVR_TAG"
 git clone --depth 1 --branch "$ALVR_TAG" "$ALVR_REPO" "$SRC/alvr"
 
+# ALVR's `alvr_session` build.rs reads `openvr/headers/openvr_driver.h` (see
+# alvr/session/build.rs). That file lives in the `openvr` git submodule, which
+# a plain `git clone` does NOT fetch. Without it the build fails with:
+#   "Missing openvr header files, did you clone the submodule?"
+# Fetch submodules after clone. `--depth 1` keeps it fast (the openvr submodule
+# is marked shallow in .gitmodules). Fall back to a full fetch if shallow fails.
+echo "==> Fetching git submodules (openvr headers required by alvr_session)"
+git -C "$SRC/alvr" submodule update --init --recursive --depth 1 \
+  || git -C "$SRC/alvr" submodule update --init --recursive
+
 # ---- 2. Toolchain (install only if missing; never swallows real errors) ----
 echo "==> Rust target + tools"
 rustup target add aarch64-linux-android >/dev/null 2>&1 || true
