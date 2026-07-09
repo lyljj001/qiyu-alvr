@@ -39,6 +39,7 @@
 #include <unistd.h>
 #include <vector>
 #include <time.h>
+#include <stdio.h>
 #include "QiyuApi.h"
 #include "Hand_Trajectory_Prediction/Hand_Trajectory_Prediction.h"
 #include "Jerk_Estimation/Jerk_Estimation.h"
@@ -79,6 +80,25 @@ static uint64_t QIYU_PROFILE_ID = 0;
 // Prediction horizon used for controller trajectory prediction (seconds).
 static const float CONTROLLER_PREDICTION_HORIZON_S = 0.035f;
 
+// ---- On-device offline logging (no USB cable needed) ----------------------
+// Every log line -- including ALVR's Rust panics, which flow through alvr_log
+// -- is also appended to a file on the headset so the user can pull it over
+// Wi-Fi without a USB cable. fflush() after each line guarantees the last
+// message before a native crash is persisted.
+static FILE *g_logFiles[3] = { nullptr, nullptr, nullptr };
+static const char *g_logPaths[3] = {
+    "/sdcard/Android/data/alvr.client/files/alvr_runtime.log",  // app-specific, always writable
+    "/data/local/tmp/alvr_runtime.log",                         // shell-readable, easy adb pull
+    "/sdcard/Download/alvr_runtime.log"                         // public, if permission allows
+};
+
+static void openLogFiles() {
+    if (g_logFiles[0] || g_logFiles[1] || g_logFiles[2]) return;
+    for (int i = 0; i < 3; i++) {
+        g_logFiles[i] = fopen(g_logPaths[i], "a");
+    }
+}
+
 void log(AlvrLogLevel level, const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -91,6 +111,19 @@ void log(AlvrLogLevel level, const char *format, ...) {
         buf[count - 1] = '\0';
 
     alvr_log(level, buf);
+
+    // Mirror to on-device file for offline (no-USB) debugging.
+    openLogFiles();
+    time_t t = time(nullptr);
+    struct tm *lt = localtime(&t);
+    char ts[16];
+    strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+    for (int i = 0; i < 3; i++) {
+        if (g_logFiles[i]) {
+            fprintf(g_logFiles[i], "[%s] %s\n", ts, buf);
+            fflush(g_logFiles[i]);
+        }
+    }
 
     va_end(args);
 }
@@ -762,15 +795,20 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
 
     alvr_initialize_logging();
 
+    info("================ ALVR session start ================");
+    info("[trace] calling eglInit");
     eglInit();
+    info("[trace] eglInit done");
 
     memset(CTX.hapticsState, 0, sizeof(CTX.hapticsState));
     QY_GL_EXT::InitFunction_Foveation();
+    info("[trace] calling qiyu_Init");
     qiyu_Init(java.ActivityObject,
               java.Vm,
               qiyu_GraphicsApi::GA_OpenGLES,
               qiyu_TrackingOriginMode::TM_Ground,
               false);
+    info("[trace] qiyu_Init done");
 
     qiyu_DeviceInfo deviceInfo = qiyu_GetDeviceInfo();
     CTX.recommendedViewWidth = deviceInfo.iEyeTargetWidth;
@@ -782,7 +820,9 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
     refreshRatesBuffer[1] = 90.f;
 
     // New ALVR ABI: register the Android context first, then initialize with capabilities.
+    info("[trace] calling alvr_initialize_android_context");
     alvr_initialize_android_context((void *) CTX.vm, (void *) CTX.context);
+    info("[trace] alvr_initialize_android_context done");
 
     AlvrClientCapabilities caps{};
     caps.default_view_width = CTX.recommendedViewWidth;
@@ -796,9 +836,13 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
     caps.prefer_10bit = false;
     caps.preferred_encoding_gamma = 1.0f;
     caps.prefer_hdr = false;
+    info("[trace] calling alvr_initialize");
     alvr_initialize(caps);
+    info("[trace] alvr_initialize done");
 
+    info("[trace] calling alvr_initialize_opengl");
     alvr_initialize_opengl();
+    info("[trace] alvr_initialize_opengl done");
     qiyu_PostSetEyeBufferSize(CTX.recommendedViewWidth, CTX.recommendedViewHeight);
 
     QIYU_PROFILE_ID = alvr_path_string_to_id(QIYU_INTERACTION_PROFILE);
@@ -824,8 +868,12 @@ extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
     info("Entering VR mode.");
 
     if (!qiyu_StartVR(CTX.window, PL_System, PL_System)) {
-        error("Invalid ANativeWindow");
+        error("qiyu_StartVR failed - aborting resume to avoid GPU hang");
+        ANativeWindow_release(CTX.window);
+        CTX.window = nullptr;
+        return;
     }
+    info("[trace] qiyu_StartVR succeeded");
 
     qiyu_SetTrackingOriginMode(qiyu_TrackingOriginMode::TM_Ground);
 
@@ -845,12 +893,16 @@ extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
     qiyu_PostSetEyeBufferSize(CTX.recommendedViewWidth, CTX.recommendedViewHeight);
 
     CTX.running = true;
+    info("[trace] starting events thread");
     CTX.eventsThread = std::thread(eventsThread);
 
     // swapchain textures are GL texture names (positive); cast to the u32** the ABI expects.
+    info("[trace] calling alvr_resume_opengl");
     alvr_resume_opengl(CTX.recommendedViewWidth, CTX.recommendedViewHeight,
                        (const uint32_t **) textureHandles, (uint32_t) textureHandlesBuffer[0].size());
+    info("[trace] calling alvr_resume");
     alvr_resume();
+    info("[trace] alvr_resume done");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -963,6 +1015,9 @@ Java_alvr_client_VRActivity_onPauseNative(JNIEnv *_env, jobject _context) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
+    if (!CTX.running || CTX.window == nullptr) {
+        return;
+    }
     double displayTime;
     qiyu_HeadPoseState tracking;
     qiyu_FrameParam frameParam;
@@ -1012,7 +1067,9 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         int swapchainIndices[2] = {CTX.streamBuffers[0].index, CTX.streamBuffers[1].index};
         qiyu_StartEye(false, EYE_Left, TT_Texture);
         qiyu_StartEye(false, EYE_Right, TT_Texture);
+        info("[trace] stream: before alvr_render_stream_opengl");
         alvr_render_stream_opengl(streamHardwareBuffer, viewParams);
+        info("[trace] stream: after alvr_render_stream_opengl");
         qiyu_EndEye(false, EYE_Left, TT_Texture);
         qiyu_EndEye(false, EYE_Right, TT_Texture);
 
@@ -1059,7 +1116,9 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
 
         qiyu_StartEye(false, EYE_Left, TT_Texture);
         qiyu_StartEye(false, EYE_Right, TT_Texture);
+        info("[trace] lobby: before alvr_render_lobby_opengl");
         alvr_render_lobby_opengl(lobbyParams, true);
+        info("[trace] lobby: after alvr_render_lobby_opengl");
         qiyu_EndEye(false, EYE_Left, TT_Texture);
         qiyu_EndEye(false, EYE_Right, TT_Texture);
 
@@ -1075,7 +1134,9 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
     frameParam.minVsyncs = 1;
     frameParam.headPoseState = tracking;
 
+    info("[trace] before qiyu_SubmitFrame");
     qiyu_SubmitFrame(frameParam);
+    info("[trace] after qiyu_SubmitFrame");
 
     CTX.ovrFrameIndex++;
 }
