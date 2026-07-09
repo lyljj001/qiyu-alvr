@@ -7,6 +7,7 @@
 #   2. Builds alvr_client_core for aarch64 (the Rust streaming/decoding core).
 #   3. Generates alvr_client_core.h with cbindgen (exact ABI the C++ bridges to).
 #   4. Copies the .so + header into build/alvr_client_core/ where CMake/gradle expect them.
+#   5. Prints the KEY generated ABI tokens to the log (so a CI failure is easy to debug).
 #
 # The final APK is built by Gradle (run `gradle assembleRelease`, or just push to
 # GitHub and let the Actions workflow build it). This script only produces the
@@ -32,8 +33,35 @@ SO_ABI="arm64-v8a"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="$ROOT/build/alvr_client_core"
 
-# cargo-ndk needs the NDK location; prefer ANDROID_NDK, fall back to ANDROID_HOME.
-export ANDROID_NDK_HOME="${ANDROID_NDK:-${ANDROID_HOME:-}}/ndk/${NDK_VERSION}"
+# ---- Resolve the NDK directory robustly ----
+# android-actions/setup-android can point ANDROID_HOME straight at the ndk dir, which
+# would otherwise produce a doubled ".../ndk/<ver>/ndk/<ver>" path and break cargo-ndk.
+# We detect a real NDK (by its source.properties), strip any doubled suffix, and fall
+# back to the standard runner location. We also force ANDROID_NDK_ROOT to match so
+# cargo-ndk's "doesn't match ANDROID_NDK_ROOT" error goes away.
+resolve_ndk() {
+  local ver="$1"
+  # 1. An explicitly-provided var that is already a real NDK dir?
+  local v
+  for v in "${ANDROID_NDK:-}" "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}"; do
+    [ -n "$v" ] && [ -f "$v/source.properties" ] && { echo "$v"; return 0; }
+  done
+  # 2. Derive from a likely SDK root (strip a trailing /ndk/<ver> if present).
+  local sdk="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+  case "$sdk" in
+    */ndk/*) sdk="$(echo "$sdk" | sed -E 's#(/ndk/[^/]+).*#\1#')" ;;
+  esac
+  local candidate
+  for base in "$sdk" "${ANDROID_HOME:-}" "/usr/local/lib/android/sdk" "$HOME/Android/Sdk"; do
+    candidate="$(ls -d "$base"/ndk/"$ver" 2>/dev/null | head -1)"
+    [ -n "$candidate" ] && [ -f "$candidate/source.properties" ] && { echo "$candidate"; return 0; }
+  done
+  echo "ERROR: cannot resolve Android NDK $ver (ANDROID_HOME=$ANDROID_HOME)" >&2
+  exit 1
+}
+export ANDROID_NDK_HOME="$(resolve_ndk "$NDK_VERSION")"
+export ANDROID_NDK="$ANDROID_NDK_HOME"
+export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 # Fixed target dir so CI can cache the (slow) Rust build across runs.
 export CARGO_TARGET_DIR="/tmp/alvr_target"
 
@@ -51,11 +79,11 @@ trap cleanup EXIT
 echo "==> Cloning ALVR $ALVR_TAG"
 git clone --depth 1 --branch "$ALVR_TAG" "$ALVR_REPO" "$SRC/alvr"
 
-# ---- 2. Toolchain ----
+# ---- 2. Toolchain (install only if missing; never swallows real errors) ----
 echo "==> Rust target + tools"
 rustup target add aarch64-linux-android >/dev/null 2>&1 || true
-cargo install cargo-ndk --version "$CARGO_NDK_VER" 2>/dev/null || true
-cargo install cbindgen --version "$CBINDGEN_VER" 2>/dev/null || true
+command -v cargo-ndk >/dev/null 2>&1 || cargo install cargo-ndk --version "$CARGO_NDK_VER"
+command -v cbindgen  >/dev/null 2>&1 || cargo install cbindgen --version "$CBINDGEN_VER"
 
 # ---- 3. Build alvr_client_core (aarch64, release) ----
 echo "==> Building alvr_client_core (slow step, ~10-40 min; cached across CI runs)"
@@ -72,6 +100,14 @@ cbindgen "$SRC/alvr/alvr/client_core" \
   --config "$SRC/alvr/alvr/client_core/cbindgen.toml" \
   --lockfile "$SRC/alvr/Cargo.lock" \
   --output "$OUT_DIR/include/alvr_client_core.h"
+
+# ---- 4b. DIAGNOSTIC: print the real generated ABI so failures are easy to debug ----
+echo "=================================================================="
+echo " GENERATED alvr_client_core.h — KEY ABI TOKENS (for debugging)"
+echo "=================================================================="
+grep -nE "ALVR_EVENT_|ALVR_BUTTON_VALUE_|ALVR_LOG_LEVEL_|enum AlvrEvent_Tag|AlvrEvent_Body|AlvrStreamConfig|AlvrStreamViewParams|AlvrLobbyViewParams|AlvrViewParams|AlvrDeviceMotion|AlvrFov|AlvrQuat|AlvrPose|void alvr_|bool alvr_|uint64_t alvr_|const char\* alvr_" \
+  "$OUT_DIR/include/alvr_client_core.h" | head -90 || true
+echo "=================================================================="
 
 # ---- 5. Stage artifacts where the Gradle/CMake build expects them ----
 mkdir -p "$OUT_DIR/$SO_ABI"

@@ -28,25 +28,30 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK (cmdline-tools)
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
       - name: Accept Android SDK licenses
         # android-actions/setup-android does NOT auto-accept licenses; without
         # this, the next step's `sdkmanager` install fails/hangs on a prompt.
         run: yes | sdkmanager --licenses >/dev/null
       - name: Install Android packages
         run: |
+          # Pin the SDK root to the GitHub runner's standard location so the
+          # NDK is installed at <root>/ndk/<ver> (single, correct path). This
+          # overrides any value setup-android may have assigned to ANDROID_HOME.
+          export ANDROID_HOME="/usr/local/lib/android/sdk"
           sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;${{ env.NDK_VERSION }}" "cmake;3.22.1"
-          echo "ANDROID_NDK=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
       - name: Install cargo-ndk + cbindgen
+        # Install only if missing, so a restored cargo/bin cache never triggers
+        # a spurious "already installed" failure.
         run: |
-          cargo install cargo-ndk --version "${{ env.CARGO_NDK_VERSION }}"
-          cargo install cbindgen --version "${{ env.CBINDGEN_VERSION }}"
+          command -v cargo-ndk >/dev/null 2>&1 || cargo install cargo-ndk --version "${{ env.CARGO_NDK_VERSION }}"
+          command -v cbindgen  >/dev/null 2>&1 || cargo install cbindgen --version "${{ env.CBINDGEN_VERSION }}"
 
       - name: Cache cargo registry + bin + target
         uses: actions/cache@v4
@@ -65,8 +70,7 @@ jobs:
         # It does NOT build the APK (Gradle runs in a later step).
         run: bash build.sh
         env:
-          ANDROID_NDK: ${{ env.ANDROID_NDK }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
       - name: Install Gradle ${{ env.GRADLE_VERSION }}
         run: |
@@ -83,3 +87,15 @@ jobs:
           name: alvr-qiyu-apk
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alvr-build-diagnostics
+          path: |
+            build/alvr_client_core/include/alvr_client_core.h
+            app/src/main/cpp/cpp_main.cpp
+            app/build/**/*.txt
+            app/build/**/*.log
+          if-no-files-found: ignore
