@@ -9,11 +9,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       ALVR_TAG: v20.14.1
       NDK_VERSION: 25.1.8937393
       GRADLE_VERSION: 7.6.1
+      CARGO_NDK_VERSION: 4.1.2
+      CBINDGEN_VERSION: 0.26.0
 
     steps:
       - name: Checkout this client repo
@@ -25,13 +27,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK + NDK + CMake
+      - name: Set up Android SDK (cmdline-tools)
         uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        # android-actions/setup-android does NOT auto-accept licenses; without
+        # this, the next step's `sdkmanager` install fails/hangs on a prompt.
+        run: yes | sdkmanager --licenses >/dev/null
       - name: Install Android packages
         run: |
           sdkmanager "platforms;android-33" "build-tools;33.0.0" "ndk;${{ env.NDK_VERSION }}" "cmake;3.22.1"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_NDK=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -39,22 +45,28 @@ jobs:
           targets: aarch64-linux-android
       - name: Install cargo-ndk + cbindgen
         run: |
-          cargo install cargo-ndk --version 2.16.0
-          cargo install cbindgen --version 0.26.0
+          cargo install cargo-ndk --version "${{ env.CARGO_NDK_VERSION }}"
+          cargo install cbindgen --version "${{ env.CBINDGEN_VERSION }}"
 
-      - name: Cache cargo registry + target
+      - name: Cache cargo registry + bin + target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            /tmp/alvr/target
+            ~/.cargo/bin
+            /tmp/alvr_target
           key: ${{ runner.os }}-cargo-${{ env.ALVR_TAG }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.ALVR_TAG }}-
 
       - name: Build alvr_client_core + generate header + stage artifacts
+        # build.sh only compiles the Rust core and stages the .so + header.
+        # It does NOT build the APK (Gradle runs in a later step).
         run: bash build.sh
         env:
           ANDROID_NDK: ${{ env.ANDROID_NDK }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       - name: Install Gradle ${{ env.GRADLE_VERSION }}
         run: |
