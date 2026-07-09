@@ -82,20 +82,50 @@ static const float CONTROLLER_PREDICTION_HORIZON_S = 0.035f;
 
 // ---- On-device offline logging (no USB cable needed) ----------------------
 // Every log line -- including ALVR's Rust panics, which flow through alvr_log
-// -- is also appended to a file on the headset so the user can pull it over
-// Wi-Fi without a USB cable. fflush() after each line guarantees the last
-// message before a native crash is persisted.
-static FILE *g_logFiles[3] = { nullptr, nullptr, nullptr };
-static const char *g_logPaths[3] = {
-    "/sdcard/Android/data/alvr.client/files/alvr_runtime.log",  // app-specific, always writable
-    "/data/local/tmp/alvr_runtime.log",                         // shell-readable, easy adb pull
-    "/sdcard/Download/alvr_runtime.log"                         // public, if permission allows
-};
+// -- is appended to a file in the app's PRIVATE directory so the user can read
+// it on the next launch (Java shows it in a dialog). The path is set by Java
+// via setLogFilePath(); default is the app's internal files dir, which is
+// always writable on every Android version without any permission.
+// fflush() after each line guarantees the last message before a native crash
+// is persisted.
+#include <jni.h>
+#include <sys/stat.h>
+#include <string.h>
 
-static void openLogFiles() {
-    if (g_logFiles[0] || g_logFiles[1] || g_logFiles[2]) return;
-    for (int i = 0; i < 3; i++) {
-        g_logFiles[i] = fopen(g_logPaths[i], "a");
+static FILE *g_logFile = nullptr;
+static char  g_logPath[1024] = "/data/data/alvr.client/files/alvr_runtime.log";
+
+static void openLogFile() {
+    if (g_logFile) return;
+    // make sure the parent directory exists
+    char dir[1024];
+    strncpy(dir, g_logPath, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        mkdir(dir, 0700);
+    }
+    g_logFile = fopen(g_logPath, "a");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_alvr_client_VRActivity_setLogFilePath(JNIEnv *env, jobject, jstring path) {
+    const char *p = env->GetStringUTFChars(path, nullptr);
+    if (p) {
+        strncpy(g_logPath, p, sizeof(g_logPath) - 1);
+        g_logPath[sizeof(g_logPath) - 1] = '\0';
+        env->ReleaseStringUTFChars(path, p);
+        if (g_logFile) { fclose(g_logFile); g_logFile = nullptr; }
+        openLogFile();
+        if (g_logFile) {
+            time_t t = time(nullptr);
+            struct tm *lt = localtime(&t);
+            char ts[16];
+            strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+            fprintf(g_logFile, "[%s] === log path set: %s ===\n", ts, g_logPath);
+            fflush(g_logFile);
+        }
     }
 }
 
@@ -113,16 +143,14 @@ void log(AlvrLogLevel level, const char *format, ...) {
     alvr_log(level, buf);
 
     // Mirror to on-device file for offline (no-USB) debugging.
-    openLogFiles();
-    time_t t = time(nullptr);
-    struct tm *lt = localtime(&t);
-    char ts[16];
-    strftime(ts, sizeof(ts), "%H:%M:%S", lt);
-    for (int i = 0; i < 3; i++) {
-        if (g_logFiles[i]) {
-            fprintf(g_logFiles[i], "[%s] %s\n", ts, buf);
-            fflush(g_logFiles[i]);
-        }
+    openLogFile();
+    if (g_logFile) {
+        time_t t = time(nullptr);
+        struct tm *lt = localtime(&t);
+        char ts[16];
+        strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+        fprintf(g_logFile, "[%s] %s\n", ts, buf);
+        fflush(g_logFile);
     }
 
     va_end(args);
@@ -850,6 +878,7 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_alvr_client_VRActivity_destroyNative(JNIEnv *_env, jobject _context) {
+    info("=== ALVR session clean exit ===");
     qiyu_Release();
     alvr_destroy();
     alvr_destroy_opengl();

@@ -1,85 +1,48 @@
-# 无 USB 取日志指南（奇遇 Dream 一体机）
+# 无 USB / 无无线调试 取崩溃日志（奇遇 Dream）
 
-你做无线串流，说明头显和电脑在同一个 Wi-Fi 下。取日志有两条路，按推荐顺序：
-
----
-
-## 方法一：无线 ADB（最干净，推荐）
-
-不需要任何线缆。前提：头显系统版本支持无线调试。
-
-### 1. 在头显上开启无线调试
-- **Android 11+**：设置 → 系统 → 开发者选项 → **无线调试** → 打开。
-  - 点进去会显示「配对码」和 `IP:端口`。
-- **奇遇/旧版 Android（9/10）**：部分国产 ROM 在 开发者选项 里直接有「**无线 ADB** / **网络调试**」开关；打开即可。
-  - 如果找不到这个开关，说明该固件只能靠 USB 开启 `adb tcpip`，那就走方法二（文件法），不依赖 ADB。
-
-### 2. 在电脑上连接
-```bat
-:: 先配对（仅 Android 11+ 无线调试需要，按头显上显示的配对码）
-adb pair 头显IP:配对端口
-
-:: 再连接（用一个长期监听端口，一般 5555；无线调试显示的是另一个连接端口，以头显提示为准）
-adb connect 头显IP:端口
-adb devices
-```
-看到设备状态 `device` 即连上。
-
-### 3. 抓日志（头显上打开 app 等闪退，电脑端）
-```bat
-:: 实时看，崩溃时 Ctrl+C 停下，复制终端内容发我
-adb logcat -v threadtime | findstr /i "VRActivity ALVR libnative libalvr libc DEBUG tombstone SIGSEGV SIGABRT FATAL AndroidRuntime session start trace"
-
-:: 或者先清空再录制到文件
-adb logcat -c
-adb logcat -v threadtime > alvr_crash.log
-:: （打开 app → 闪退 → Ctrl+C）
-```
-
-> 注意：用无线调试时，`adb connect` 的端口和 `adb pair` 的端口不同，以头显界面提示为准。
+系统设置没有「无线调试」开关，也不用 USB。新方案让 app **自己把崩溃原因显示在屏幕上**。
 
 ---
 
-## 方法二：一体机本地文件（100% 不需要电脑/USB）
+## 为什么上一版「三个地方都没日志」
 
-已在新版 `cpp_main.cpp` 的 `log()` 里挂了文件镜像：**每一次日志（含 ALVR Rust 的 panic 文本）都会实时 `fflush` 写进头显存储**，崩溃前最后一行必然落盘。文件位置（任一处存在即可）：
-
-```
-/sdcard/Android/data/alvr.client/files/alvr_runtime.log   ← 应用私有目录，必定可写
-/data/local/tmp/alvr_runtime.log                          ← shell 可读，adb pull 方便
-/sdcard/Download/alvr_runtime.log                         ← 公共目录（无权限时可能为空）
-```
-
-### 怎么把文件弄出来（任选）
-1. **无线 ADB pull**（若方法一可用）：
-   ```bat
-   adb pull /sdcard/Android/data/alvr.client/files/alvr_runtime.log .
-   adb pull /data/local/tmp/alvr_runtime.log .
-   ```
-2. **头显自带文件管理器**：用头显里的「文件管理 / 我的文件」应用打开上面路径，找到 `alvr_runtime.log`，**截图最后 ~30 行**发我（或长按分享/发送到微信之类的）。
-3. **局域网共享**：若头显有「文件共享 / SMB / FTP」开关，开起来从电脑访问拷贝。
-
-### 我需要你看什么
-打开文件，找 `================ ALVR session start ================` 这一行（每次启动一条），
-往下看**最后成功打印的 `[trace]` 是哪一句**，以及它之后**有没有对应的 `done` / `after`**。例如：
-
-- 停在 `lobby: before alvr_render_lobby_opengl` 且没 `after` → 崩在 lobby 渲染（假设 A）。
-- `alvr_initialize` 之后没有 `done`，且文件里有 `panicked at ...` → ALVR 初始化 panic（假设 B）。
-- 停在 `before qiyu_SubmitFrame` 没 `after` → 帧提交时提交了无效 texture（假设 C）。
-
-把这几行原文发我即可，不用发整个文件。**panic 文本如果在文件里出现，是最直接的定位证据。**
+上一版把日志写到 `/sdcard/Download`、`/data/local/tmp` 等路径，在 **release 包（API 33）** 下全部写不进去（scoped storage 限制 + 目录没 mkdir），所以日志器其实是死的——崩溃早发生在我们能打印之前，文件自然全空。这反而说明：**崩溃极可能发生在 native 库加载 / 初始化阶段**，比渲染还早。
 
 ---
 
-## 关键提醒
-- **不要反复点开 app 直到拿到日志**：之前黑屏无响应是 GPU 驱动 hang。新版本已加 `qiyu_StartVR` 失败即释放的 guard，二次进入最多回 launcher，不再死锁，但拿日志前仍尽量少折腾。
+## 新版怎么做（已改 `VRActivity.java` + `cpp_main.cpp`）
+
+1. **库加载移出 `static` 块、改在 `onCreate` 里 try/catch**
+   - 如果 `libalvr_client_core.so` / `libnative_lib.so` 加载失败（缺符号、ABI 不匹配、Rust 静态初始化 panic），会**直接弹出对话框显示确切错误**，而不是静默闪退。
+2. **C++ 日志写到 app 私有目录** `/data/data/alvr.client.qiyu/files/alvr_runtime.log`
+   - 由 Java 用 `setLogFilePath()` 指定，必定可写、无需任何权限、自动 mkdir。
+3. **每次启动检测上一次是否「干净退出」**：`destroyNative` 正常退出会写 `=== ALVR session clean exit ===`；若上次没有这个标记（即任何位置崩溃），**下次打开 app 就弹窗显示上次日志尾部**。
+4. **弹窗内容同时备份到** `/sdcard/Download/alvr_crash.txt`（尽力而为），以防 VR 合成器盖住 Android 对话框。
+
+---
+
+## 你需要做的（两步）
+
+1. 重编译并安装这个新版本（已含上述改动）。
+2. 打开 app：
+   - **情况 A（库加载失败）**：立刻弹出「ALVR Qiyu - debug info」对话框，里面是确切错误（例如 `dlopen failed: cannot locate symbol "alvr_xxx"`、`library "libalvr_client_core.so" not found`、`has bad ELF magic` 等）。**截图发我**。
+   - **情况 B（库加载成功但后续崩溃）**：第一次可能仍闪退（日志已落盘）；**再打开一次**，这次会弹出上次崩溃的日志尾部。**截图发我**。
+   - 若弹窗被 VR 画面盖住看不到：用头显自带的「文件管理」应用打开 `内部存储/Download/alvr_crash.txt`，**截图最后 ~40 行**发我。
+
+---
+
+## 我需要你发的内容
+
+- 情况 A：对话框里的**完整错误文本**（最关键，直接定位 .so 问题）。
+- 情况 B：日志尾部，重点看最后一次成功的 `[trace]` 是哪句、有没有对应的 `done`/`after`，以及是否出现 `panicked at ...`。
+  - 停在 `calling eglInit` 没 `eglInit done` → 崩在 eglInit（我们自己的 GL 初始化）。
+  - 停在 `lobby: before alvr_render_lobby_opengl` 没 `after` → 崩在 lobby 渲染。
+  - `alvr_initialize` 后无 `done` 且出现 `panicked at` → ALVR 初始化 panic。
+
+把截图或文本发我，即可精确定位并修复，无需 USB、无需无线调试。
+
+---
+
+## 备注
+- 崩溃日志文件是追加模式，会越来越大。定位完可删 `/data/data/alvr.client.qiyu/files/alvr_runtime.log` 与 `Download/alvr_crash.txt`，或重装 app 清空。
 - 若头显卡死：长按电源键 10 秒强制重启。
-- 文件是**追加模式**，会越攒越大。定位完后可删掉这三个文件，或重装 app 清空应用私有目录。
-
----
-
-## 一句话流程
-1. 重编译并安装带文件日志的 APK。
-2. 头显上打开 app 一次（闪退）。
-3. 用「无线 ADB pull」或「头显文件管理器截图」取出 `alvr_runtime.log` 最后 30 行。
-4. 发我，我据此精确定位并修复。
