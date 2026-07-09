@@ -41,19 +41,23 @@ OUT_DIR="$ROOT/build/alvr_client_core"
 # cargo-ndk's "doesn't match ANDROID_NDK_ROOT" error goes away.
 resolve_ndk() {
   local ver="$1"
-  # 1. An explicitly-provided var that is already a real NDK dir?
-  local v
-  for v in "${ANDROID_NDK:-}" "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}"; do
-    [ -n "$v" ] && [ -f "$v/source.properties" ] && { echo "$v"; return 0; }
-  done
-  # 2. Derive from a likely SDK root (strip a trailing /ndk/<ver> if present).
+  # Normalize a likely SDK root (strip a trailing /ndk/<ver> if present).
   local sdk="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
   case "$sdk" in
     */ndk/*) sdk="$(echo "$sdk" | sed -E 's#(/ndk/[^/]+).*#\1#')" ;;
   esac
   local candidate
+  # 1. The NDK version we explicitly installed via sdkmanager (preferred).
+  candidate="$(ls -d "$sdk"/ndk/"$ver" 2>/dev/null | head -1)"
+  [ -n "$candidate" ] && [ -f "$candidate/source.properties" ] && { echo "$candidate"; return 0; }
+  # 2. Any explicitly-set valid NDK var (e.g. ANDROID_NDK_ROOT).
+  local v
+  for v in "${ANDROID_NDK:-}" "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}"; do
+    [ -n "$v" ] && [ -f "$v/source.properties" ] && { echo "$v"; return 0; }
+  done
+  # 3. Broader search for any installed NDK as a fallback.
   for base in "$sdk" "${ANDROID_HOME:-}" "/usr/local/lib/android/sdk" "$HOME/Android/Sdk"; do
-    candidate="$(ls -d "$base"/ndk/"$ver" 2>/dev/null | head -1)"
+    candidate="$(ls -d "$base"/ndk/*/ 2>/dev/null | head -1)"
     [ -n "$candidate" ] && [ -f "$candidate/source.properties" ] && { echo "$candidate"; return 0; }
   done
   echo "ERROR: cannot resolve Android NDK $ver (ANDROID_HOME=$ANDROID_HOME)" >&2
@@ -86,9 +90,14 @@ command -v cargo-ndk >/dev/null 2>&1 || cargo install cargo-ndk --version "$CARG
 command -v cbindgen  >/dev/null 2>&1 || cargo install cbindgen --version "$CBINDGEN_VER"
 
 # ---- 3. Build alvr_client_core (aarch64, release) ----
+# NOTE: cargo-ndk 4.x has NO `-p <platform>` short flag (it treats `-p` as a
+# cargo package selector). The minimum Android API level is set via the
+# CARGO_NDK_PLATFORM env var instead. `-p alvr_client_core` below is the cargo
+# package selector (correct).
 echo "==> Building alvr_client_core (slow step, ~10-40 min; cached across CI runs)"
 cd "$SRC/alvr"
-cargo ndk -t "$NDK_TARGET" -p "$MIN_SDK" build -p alvr_client_core --release
+export CARGO_NDK_PLATFORM="$MIN_SDK"
+cargo ndk -t "$NDK_TARGET" build -p alvr_client_core --release
 
 SO_SRC="$CARGO_TARGET_DIR/aarch64-linux-android/release/libalvr_client_core.so"
 [ -f "$SO_SRC" ] || { echo "ERROR: $SO_SRC not found" >&2; exit 1; }
