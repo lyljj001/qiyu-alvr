@@ -106,7 +106,18 @@ public class VRActivity extends Activity {
             return;
         }
 
-        // 3) Point the C++ file logger at our private, always-writable directory.
+        // 3) Pass the app's AssetManager to the Qiyu SDK. libqiyivrsdkcore.so's
+        //    setNativeAssetManager native method uses AAssetManager_fromJava to
+        //    load shaders/configs. Must be called before qiyu_Init.
+        try {
+            com.qiyi.qiyivrsdkcore.AndroidPlugin.setNativeAssetManager(getAssets());
+        } catch (Throwable t) {
+            // Best-effort; if this fails, the SDK may still work without assets
+            // or will report the issue later.
+            Log.w(TAG, "setNativeAssetManager failed", t);
+        }
+
+        // 4) Point the C++ file logger at our private, always-writable directory.
         setLogFilePath(new File(getFilesDir(), LOG_FILE_NAME).getAbsolutePath());
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);

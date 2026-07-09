@@ -158,6 +158,68 @@ if [ -n "${ANDROID_NDK:-}" ]; then
   fi
 fi
 
+# ---- Download Qiyu SDK Java classes from QiyuNativeSDK AARs ---------------
+# The .so files are already in jniLibs, but the Java SDK classes (AndroidPlugin,
+# SxrApi, ControllerManager, etc.) and the qiyu_recenter.png asset are inside
+# AAR files in the QiyuNativeSDK repo. Without these, libqiyivrsdkcore.so's
+# JNI_OnLoad fails (FindClass returns null → System.load throws).
+QIYU_SDK_REPO="https://github.com/hallychou/QiyuNativeSDK/raw/main/QiyuNativeSDK/Lib"
+LIBS_DIR="$ROOT/app/libs"
+ASSETS_DIR="$ROOT/app/src/main/assets"
+mkdir -p "$LIBS_DIR" "$ASSETS_DIR"
+
+echo "==> Downloading Qiyu SDK AARs and extracting Java classes..."
+
+# Download each release AAR, extract classes.jar, extract assets where present.
+for aar_spec in \
+  "qiyivrsdkcore-v8a-release.aar:qiyivrsdkcore-classes.jar:true" \
+  "qiyuapi-v8a-release.aar:qiyuapi-classes.jar:false" \
+  "sxrApi-v8a-release.aar:sxrapi-classes.jar:false"
+do
+  aar_name="${aar_spec%%:*}"
+  rest="${aar_spec#*:}"
+  jar_name="${rest%%:*}"
+  has_assets="${rest##*:}"
+
+  tmp_aar="/tmp/$aar_name"
+  curl -sL -o "$tmp_aar" "$QIYU_SDK_REPO/$aar_name"
+  if [ ! -s "$tmp_aar" ]; then
+    echo "WARNING: Failed to download $aar_name -- Qiyu SDK Java classes will be missing!" >&2
+    continue
+  fi
+
+  # Extract classes.jar and rename
+  python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('$tmp_aar') as z:
+    z.extract('classes.jar', '/tmp/aar_extract')
+" 2>/dev/null || unzip -o "$tmp_aar" classes.jar -d /tmp/aar_extract 2>/dev/null
+  mv /tmp/aar_extract/classes.jar "$LIBS_DIR/$jar_name"
+  rm -rf /tmp/aar_extract
+
+  # Extract assets (only qiyivrsdkcore has them)
+  if [ "$has_assets" = "true" ]; then
+    python3 -c "
+import zipfile, os
+with zipfile.ZipFile('$tmp_aar') as z:
+    for name in z.namelist():
+        if name.startswith('assets/') and not name.endswith('/'):
+            os.makedirs('$ASSETS_DIR', exist_ok=True)
+            with open(os.path.join('$ASSETS_DIR', name[len('assets/'):]), 'wb') as f:
+                f.write(z.read(name))
+            print('  Extracted asset: ' + name)
+" 2>/dev/null || unzip -o "$tmp_aar" 'assets/*' -d "$ROOT/app/src/main" 2>/dev/null
+  fi
+
+  rm -f "$tmp_aar"
+  echo "  $aar_name -> $jar_name"
+done
+
+echo "==> Qiyu SDK Java classes staged in app/libs/"
+echo "   qiyivrsdkcore-classes.jar (AndroidPlugin, Vector3f, BoundaryHelper, etc.)"
+echo "   sxrapi-classes.jar (SxrApi, ControllerManager, SvrServiceClient, etc.)"
+echo "   qiyuapi-classes.jar (BuildConfig)"
+
 echo "==> Artifacts staged:"
 echo "   $OUT_DIR/$SO_ABI/libalvr_client_core.so"
 echo "   $OUT_DIR/alvr_client_core.h"
